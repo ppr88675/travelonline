@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:isar/isar.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../core/database/database_provider.dart';
+import '../../trip/domain/trip.dart';
 import '../domain/itinerary_item.dart';
 
 class TimelinePage extends ConsumerStatefulWidget {
@@ -17,54 +18,49 @@ class TimelinePage extends ConsumerStatefulWidget {
 
 class _TimelinePageState extends ConsumerState<TimelinePage> {
   ActivityCategory? _selectedCategory;
+  Trip? _currentTrip;
+  List<Trip> _allTrips = [];
   List<ItineraryItem> _items = [];
   bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadItems();
+    _loadTripAndItems();
   }
 
-  /// 從本地 Isar 資料庫讀取行程（若完全空白則寫入初始範例，皆可自由編輯或刪除）
-  Future<void> _loadItems() async {
+  /// 讀取目前選取的 Trip 與該 Trip 專屬的行程（絕不自動塞回已刪除的預設行程）
+  Future<void> _loadTripAndItems() async {
     final isar = ref.read(isarProvider);
-    var items = await isar.itineraryItems.where().findAll();
+    final selectedTripId = ref.read(selectedTripIdProvider);
+    final allTrips = await isar.trips.where().findAll();
+    allTrips.sort((a, b) => a.startDate.compareTo(b.startDate));
 
-    if (items.isEmpty) {
-      final defaults = [
-        ItineraryItem()
-          ..tripId = 1
-          ..time = DateTime(2026, 4, 10, 9, 30)
-          ..title = '淺草寺 雷門'
-          ..category = ActivityCategory.sightseeing
-          ..statusTag = '自由參觀'
-          ..notesOrBudget = '預計停留 1.5 小時，人潮眾多注意隨身物品',
-        ItineraryItem()
-          ..tripId = 1
-          ..time = DateTime(2026, 4, 10, 11, 45)
-          ..title = '淺草 今半（壽喜燒）'
-          ..category = ActivityCategory.food
-          ..statusTag = '已預約 11:45'
-          ..notesOrBudget = '午間御膳 預算 ¥4,500 / 人',
-        ItineraryItem()
-          ..tripId = 1
-          ..time = DateTime(2026, 4, 10, 14, 15)
-          ..title = 'FUGLEN ASAKUSA'
-          ..category = ActivityCategory.cafe
-          ..statusTag = '必訪咖啡'
-          ..notesOrBudget = '招牌北歐風手沖咖啡與鬆餅',
-      ];
-      await isar.writeTxn(() async {
-        await isar.itineraryItems.putAll(defaults);
+    Trip? activeTrip;
+    if (selectedTripId != null) {
+      activeTrip = allTrips.where((t) => t.id == selectedTripId).firstOrNull;
+    }
+    if (activeTrip == null && allTrips.isNotEmpty) {
+      activeTrip = allTrips.first;
+      Future.microtask(() {
+        if (mounted) {
+          ref.read(selectedTripIdProvider.notifier).state = activeTrip!.id;
+        }
       });
-      items = await isar.itineraryItems.where().findAll();
     }
 
-    items.sort((a, b) => a.time.compareTo(b.time));
+    List<ItineraryItem> tripItems = [];
+    if (activeTrip != null) {
+      final allItems = await isar.itineraryItems.where().findAll();
+      tripItems = allItems.where((e) => e.tripId == activeTrip!.id).toList();
+      tripItems.sort((a, b) => a.time.compareTo(b.time));
+    }
+
     if (mounted) {
       setState(() {
-        _items = items;
+        _allTrips = allTrips;
+        _currentTrip = activeTrip;
+        _items = tripItems;
         _isLoading = false;
       });
     }
@@ -75,7 +71,7 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
     await isar.writeTxn(() async {
       await isar.itineraryItems.delete(item.id);
     });
-    await _loadItems();
+    await _loadTripAndItems();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -101,13 +97,15 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
     }
   }
 
-  /// 開啟「手動新增 / 編輯行程」彈窗（亦可由網路搜尋結果帶入預填資料）
+  /// 開啟「手動新增 / 編輯行程」彈窗
   Future<void> _showAddOrEditDialog({
     ItineraryItem? existingItem,
     String? prefillTitle,
     ActivityCategory? prefillCategory,
     String? prefillNotes,
   }) async {
+    if (_currentTrip == null) return;
+
     final titleCtrl = TextEditingController(
       text: existingItem?.title ?? prefillTitle ?? '',
     );
@@ -119,7 +117,19 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
     );
     ActivityCategory selectedCat =
         existingItem?.category ?? prefillCategory ?? ActivityCategory.sightseeing;
-    DateTime selectedTime = existingItem?.time ?? DateTime.now();
+
+    // 預設時間自動對齊當前旅程的出發日期早上 09:30，方便規劃未來月份的行程
+    DateTime defaultInitialTime = DateTime(
+      _currentTrip!.startDate.year,
+      _currentTrip!.startDate.month,
+      _currentTrip!.startDate.day,
+      9,
+      30,
+    );
+    if (_items.isNotEmpty) {
+      defaultInitialTime = _items.last.time.add(const Duration(hours: 2));
+    }
+    DateTime selectedTime = existingItem?.time ?? defaultInitialTime;
 
     final statusSuggestions = ['已預約', '必吃推薦', '需購票', '自由參觀', '已付款'];
 
@@ -150,12 +160,16 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(
-                          existingItem == null ? '新增行程項目' : '編輯行程項目',
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF0F172A),
+                        Expanded(
+                          child: Text(
+                            existingItem == null
+                                ? '新增行程至「${_currentTrip!.title}」'
+                                : '編輯行程項目',
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF0F172A),
+                            ),
                           ),
                         ),
                         IconButton(
@@ -165,8 +179,6 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                       ],
                     ),
                     const SizedBox(height: 12),
-
-                    // 地點 / 店家名稱
                     TextField(
                       controller: titleCtrl,
                       decoration: InputDecoration(
@@ -179,8 +191,6 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                       ),
                     ),
                     const SizedBox(height: 16),
-
-                    // 行程類別選擇
                     const Text(
                       '選擇類別',
                       style: TextStyle(
@@ -215,8 +225,6 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                       }).toList(),
                     ),
                     const SizedBox(height: 16),
-
-                    // 日期與時間選擇
                     InkWell(
                       borderRadius: BorderRadius.circular(12),
                       onTap: () async {
@@ -224,7 +232,7 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                           context: context,
                           initialDate: selectedTime,
                           firstDate: DateTime(2024),
-                          lastDate: DateTime(2032),
+                          lastDate: DateTime(2035),
                         );
                         if (pickedDate == null) return;
                         if (!context.mounted) return;
@@ -272,8 +280,6 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                       ),
                     ),
                     const SizedBox(height: 16),
-
-                    // 狀態標記 + 快速填入按鈕
                     TextField(
                       controller: statusCtrl,
                       decoration: InputDecoration(
@@ -299,8 +305,6 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                       }).toList(),
                     ),
                     const SizedBox(height: 12),
-
-                    // 備註 / 預算 / 地址
                     TextField(
                       controller: notesCtrl,
                       maxLines: 3,
@@ -314,8 +318,6 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                       ),
                     ),
                     const SizedBox(height: 20),
-
-                    // 儲存按鈕
                     SizedBox(
                       width: double.infinity,
                       height: 50,
@@ -336,7 +338,7 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
 
                           final isar = ref.read(isarProvider);
                           final item = existingItem ?? ItineraryItem();
-                          item.tripId = 1;
+                          item.tripId = _currentTrip!.id;
                           item.title = title;
                           item.category = selectedCat;
                           item.time = selectedTime;
@@ -350,7 +352,7 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                           });
 
                           if (ctx.mounted) Navigator.pop(ctx);
-                          await _loadItems();
+                          await _loadTripAndItems();
                         },
                       ),
                     ),
@@ -364,22 +366,25 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
     );
   }
 
-  /// 開啟「網路搜尋店家與景點」面板（串接 OpenStreetMap 全球免費景點與店家資料庫，免 API Key）
+  /// 開啟「網路搜尋店家與景點」面板（自動結合當前旅程的目的地國家/城市）
   Future<void> _openOnlineSearchModal() async {
+    if (_currentTrip == null) return;
+
+    final dest = _currentTrip!.destination;
     final searchCtrl = TextEditingController();
     List<Map<String, dynamic>> searchResults = [];
     bool isSearching = false;
     String? errorMsg;
 
     final quickKeywords = [
+      '$dest 景點',
+      '$dest 美食',
+      '$dest 咖啡',
       '淺草寺',
       '一蘭拉麵',
-      '東京鐵塔',
-      '藍瓶咖啡',
       '敘敘苑',
-      '京都 清水寺',
-      '大阪 環球影城',
-      '台北 101',
+      '藍瓶咖啡',
+      '環球影城',
     ];
 
     ActivityCategory detectCategory(String type, String clazz) {
@@ -476,7 +481,7 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
             searchResults = parsed;
             isSearching = false;
             if (parsed.isEmpty) {
-              errorMsg = '找不到「$q」的相關結果，可嘗試輸入「城市 + 店名」（如：東京 一蘭）或直接點上方「直接納入」按鈕加入。';
+              errorMsg = '找不到「$q」的相關結果，可嘗試輸入「$dest + 店名」或點選上方「直接納入」按鈕加入。';
             }
           });
         } else {
@@ -517,19 +522,24 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Row(
-                            children: [
-                              Icon(Icons.travel_explore, color: Color(0xFF0EA5E9)),
-                              SizedBox(width: 8),
-                              Text(
-                                '探索網路店家與景點',
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: Color(0xFF0F172A),
+                          Expanded(
+                            child: Row(
+                              children: [
+                                const Icon(Icons.travel_explore, color: Color(0xFF0EA5E9)),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    '搜尋店家與景點（${_currentTrip!.destination}）',
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 17,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF0F172A),
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                           IconButton(
                             icon: const Icon(Icons.close),
@@ -547,7 +557,7 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                               onChanged: (_) => setSheetState(() {}),
                               onSubmitted: (val) => performSearch(val, setSheetState),
                               decoration: InputDecoration(
-                                hintText: '輸入景點、餐廳、咖啡廳 (例：淺草 今半)',
+                                hintText: '輸入景點、餐廳、咖啡廳 (例：$dest 燒肉)',
                                 filled: true,
                                 fillColor: Colors.white,
                                 prefixIcon: const Icon(Icons.search),
@@ -661,7 +671,7 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
                                 : searchResults.isEmpty
                                     ? const Center(
                                         child: Text(
-                                          '輸入關鍵字或點擊上方熱門標籤，\n即可搜尋全球景點、餐廳、咖啡廳與飯店並一鍵納入行程！',
+                                          '輸入關鍵字或點擊上方熱門標籤，\n即可搜尋全球景點、餐廳、咖啡廳與飯店並一鍵納入當前旅程！',
                                           textAlign: TextAlign.center,
                                           style: TextStyle(
                                             color: Color(0xFF64748B),
@@ -786,17 +796,176 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
     );
   }
 
+  /// 快速切換不同旅程的底部選單
+  void _showSwitchTripSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        final fmt = DateFormat('yyyy/MM/dd');
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    '切換要規劃的旅程',
+                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                  ),
+                  TextButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      ref.read(bottomNavIndexProvider.notifier).state = 0;
+                    },
+                    icon: const Icon(Icons.settings_outlined, size: 16),
+                    label: const Text('管理/新增旅程'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              ..._allTrips.map((t) {
+                final isSelected = t.id == _currentTrip?.id;
+                return ListTile(
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  tileColor: isSelected ? const Color(0xFFE0F2FE) : null,
+                  leading: Icon(
+                    Icons.flight_takeoff,
+                    color: isSelected ? const Color(0xFF0284C7) : const Color(0xFF64748B),
+                  ),
+                  title: Text(
+                    t.title,
+                    style: TextStyle(
+                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  subtitle: Text(
+                    '${t.destination}｜${fmt.format(t.startDate)} - ${fmt.format(t.endDate)}',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  trailing: isSelected
+                      ? const Icon(Icons.check_circle, color: Color(0xFF0284C7))
+                      : null,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    ref.read(selectedTripIdProvider.notifier).state = t.id;
+                  },
+                );
+              }),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    ref.listen<int?>(selectedTripIdProvider, (prev, next) {
+      _loadTripAndItems();
+    });
+    ref.listen<int>(bottomNavIndexProvider, (prev, next) {
+      if (next == 1) {
+        _loadTripAndItems();
+      }
+    });
+
+    if (_isLoading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    if (_currentTrip == null) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text(
+            '行程日程',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+          ),
+        ),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.luggage_outlined, size: 64, color: Color(0xFF94A3B8)),
+                const SizedBox(height: 16),
+                const Text(
+                  '請先建立或選擇一個旅程',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF334155),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '先建立例如「10月 日本行」或「11月 韓國行」，即可開始為該趟旅程安排專屬景點與店家！',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: Color(0xFF64748B)),
+                ),
+                const SizedBox(height: 20),
+                FilledButton.icon(
+                  onPressed: () {
+                    ref.read(bottomNavIndexProvider.notifier).state = 0;
+                  },
+                  icon: const Icon(Icons.add),
+                  label: const Text('前往建立旅程'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     final filteredItems = _selectedCategory == null
         ? _items
         : _items.where((e) => e.category == _selectedCategory).toList();
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          '旅程日程',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+        title: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: _showSwitchTripSheet,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        _currentTrip!.title,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(Icons.swap_horiz, size: 18, color: Color(0xFF0EA5E9)),
+                  ],
+                ),
+                Text(
+                  '${_currentTrip!.destination}（點擊切換其他旅程）',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
         actions: [
           FilledButton.tonalIcon(
@@ -816,42 +985,46 @@ class _TimelinePageState extends ConsumerState<TimelinePage> {
         children: [
           _buildFilterBar(),
           Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : filteredItems.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(
-                              Icons.event_note_outlined,
-                              size: 56,
-                              color: Color(0xFF94A3B8),
+            child: filteredItems.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.event_note_outlined,
+                            size: 56,
+                            color: Color(0xFF94A3B8),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            _selectedCategory == null
+                                ? '「${_currentTrip!.title}」目前尚無行程'
+                                : '目前尚無「${_selectedCategory!.label}」類別的行程',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF475569),
                             ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              '目前尚無此類別的行程',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF475569),
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              '點擊右上角「搜尋景點/店家」或右下角「＋新增行程」開始規劃！',
-                              style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
-                            ),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 88),
-                        itemCount: filteredItems.length,
-                        itemBuilder: (context, index) {
-                          return _buildTimelineCard(filteredItems[index]);
-                        },
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            '點擊右上角「搜尋景點/店家」或右下角「＋新增行程」開始規劃！',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+                          ),
+                        ],
                       ),
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 88),
+                    itemCount: filteredItems.length,
+                    itemBuilder: (context, index) {
+                      return _buildTimelineCard(filteredItems[index]);
+                    },
+                  ),
           ),
         ],
       ),

@@ -1,9 +1,13 @@
 name: Build Android APK
 
+# ⭐ 改為僅限「手動點擊觸發」，改檔案時不再自動偷跑
 on:
-  push:
-    branches: [ main, master ]
-  workflow_dispatch: # 支援在 GitHub 網頁手動點擊執行
+  workflow_dispatch:
+
+# 若手動連續點擊，自動取消前一個未完成的任務
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -40,10 +44,16 @@ jobs:
       - name: 下載 Flutter 套件
         run: flutter pub get
 
-      # ⭐ 關鍵修復：自動在雲端為 isar_flutter_libs 補上 AGP 8 所需的 namespace
-      - name: 修復 Isar 與 Android Gradle Plugin 8+ Namespace 相容性
+      # ⭐ 一次性完整排除 Isar 在 AGP 8+ 的三大隱藏地雷（防重複寫入 + SDK 36 + 移除舊版 package 屬性）
+      - name: 一次性完整修復 Isar 與新版 Android SDK 36 / AGP 8+ 相容性
         run: |
-          find ~/.pub-cache -path "*/isar_flutter_libs*/android/build.gradle" -exec sed -i 's/android {/android {\n    namespace "dev.isar.isar_flutter_libs"/' {} + || true
+          for f in $(find ~/.pub-cache -path "*/isar_flutter_libs*/android/build.gradle"); do
+            grep -q "namespace" "$f" || sed -i 's/android {/android {\n    namespace "dev.isar.isar_flutter_libs"/' "$f"
+            sed -i 's/compileSdkVersion [0-9]*/compileSdkVersion 36/' "$f"
+          done
+          for m in $(find ~/.pub-cache -path "*/isar_flutter_libs*/android/src/main/AndroidManifest.xml"); do
+            sed -i 's/package="dev.isar.isar_flutter_libs"//g' "$m"
+          done
 
       - name: 生成 Isar 資料庫存取代碼
         run: dart run build_runner build --delete-conflicting-outputs

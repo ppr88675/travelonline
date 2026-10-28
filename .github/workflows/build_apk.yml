@@ -1,10 +1,10 @@
 name: Build Android APK
 
-# ⭐ 改為僅限「手動點擊觸發」，改檔案時不再自動偷跑
+# ⭐ 改為僅限「手動點擊觸發」，避免每次修改檔案就自動重複跑部署！
 on:
   workflow_dispatch:
 
-# 若手動連續點擊，自動取消前一個未完成的任務
+# 若手動連續觸發，自動取消上一個還沒跑完的任務，節省時間
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -29,7 +29,7 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: 雲端自動生成 Android 原生配置 (若本機未建立)
+      - name: 雲端自動生成 Android 原生配置並開啟網路權限
         run: |
           if [ ! -d "android" ]; then
             echo "偵測到缺少 android 資料夾，自動由 Flutter 建立原生骨架..."
@@ -40,11 +40,15 @@ jobs:
             mv lib_backup lib
             mv pubspec.yaml.bak pubspec.yaml
           fi
+          # 確保正式版 APK 具備網路權限，供線上搜尋景點與店家使用
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            grep -q "android.permission.INTERNET" "$MANIFEST" || sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/' "$MANIFEST"
+          fi
 
       - name: 下載 Flutter 套件
         run: flutter pub get
 
-      # ⭐ 一次性完整排除 Isar 在 AGP 8+ 的三大隱藏地雷（防重複寫入 + SDK 36 + 移除舊版 package 屬性）
       - name: 一次性完整修復 Isar 與新版 Android SDK 36 / AGP 8+ 相容性
         run: |
           for f in $(find ~/.pub-cache -path "*/isar_flutter_libs*/android/build.gradle"); do

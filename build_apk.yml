@@ -1,0 +1,53 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: # 支援在 GitHub 網頁手動點擊執行
+
+jobs:
+  build:
+    name: Build & Package APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下載專案代碼
+        uses: actions/checkout@v4
+
+      - name: 設定 Java 17 環境
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 設定 Flutter 環境
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: 雲端自動生成 Android 原生配置 (若本機未建立)
+        run: |
+          if [ ! -d "android" ]; then
+            echo "偵測到缺少 android 資料夾，自動由 Flutter 建立原生骨架..."
+            cp -r lib lib_backup
+            cp pubspec.yaml pubspec.yaml.bak
+            flutter create . --platforms=android --org com.travelplanner
+            rm -rf lib
+            mv lib_backup lib
+            mv pubspec.yaml.bak pubspec.yaml
+          fi
+
+      - name: 下載 Flutter 套件
+        run: flutter pub get
+
+      - name: 生成 Isar 資料庫存取代碼
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: 編譯 Release APK
+        run: flutter build apk --release
+
+      - name: 上傳 APK 成品至 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TravelPlanner-Release-APK
+          path: build/app/outputs/flutter-apk/app-release.apk

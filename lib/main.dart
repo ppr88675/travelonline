@@ -6,10 +6,8 @@ import 'features/home/presentation/main_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. 初始化本地離線資料庫
   final isar = await initIsarDatabase();
 
-  // 2. 啟動 App 並覆蓋 ProviderScope
   runApp(
     ProviderScope(
       overrides: [
@@ -42,7 +40,8 @@ class TravelPlannerApp extends StatelessWidget {
           foregroundColor: Color(0xFF0F172A),
           centerTitle: false,
         ),
-        cardTheme: const CardThemeData(
+        // ⭐ 已移除前面的 const，允許 BorderRadius.circular 正常執行
+        cardTheme: CardThemeData(
           elevation: 0,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),

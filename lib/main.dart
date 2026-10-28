@@ -42,7 +42,7 @@ class TravelPlannerApp extends StatelessWidget {
           foregroundColor: Color(0xFF0F172A),
           centerTitle: false,
         ),
-        cardTheme: CardTheme(
+        cardTheme: const CardThemeData(
           elevation: 0,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
